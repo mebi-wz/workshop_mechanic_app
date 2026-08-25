@@ -28,6 +28,9 @@ class TaskRepository {
   String _outsourceRequestsCacheKey(int uid) => 'outsource_requests_$uid';
   String _performanceCacheKey(int uid) => 'mechanic_performance_$uid';
 
+  String _mapLink(double lat, double lng) =>
+      'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
+
   List<Map<String, dynamic>> getCachedMrcvRequests() {
     final uid = _client.session?.uid;
     return uid == null
@@ -389,12 +392,13 @@ class TaskRepository {
   /// Mobile Check-In with GPS coordinates. Returns true if synced live, false if queued offline.
   Future<bool> checkIn(double lat, double lng) async {
     final timestamp = DateTime.now().toUtc().toIso8601String();
+    final mapLink = _mapLink(lat, lng);
     if (_syncManager.isOnline) {
       try {
         await _client.callKw(
           model: 'workshop.duty.log',
           method: 'action_mobile_check_in',
-          args: [lat, lng, timestamp],
+          args: [lat, lng, timestamp, mapLink],
         );
         await _taskCache.saveDutyStatus(_client.session!.uid, true);
         return true;
@@ -406,7 +410,12 @@ class TaskRepository {
         await _dbHelper.queueAction(
           'check_in',
           0,
-          payload: '{"lat": $lat, "lng": $lng, "timestamp": "$timestamp"}',
+          payload: jsonEncode({
+            'lat': lat,
+            'lng': lng,
+            'timestamp': timestamp,
+            'map_link': mapLink
+          }),
         );
         await _taskCache.saveDutyStatus(_client.session!.uid, true);
         return false;
@@ -415,7 +424,12 @@ class TaskRepository {
       await _dbHelper.queueAction(
         'check_in',
         0,
-        payload: '{"lat": $lat, "lng": $lng, "timestamp": "$timestamp"}',
+        payload: jsonEncode({
+          'lat': lat,
+          'lng': lng,
+          'timestamp': timestamp,
+          'map_link': mapLink
+        }),
       );
       await _taskCache.saveDutyStatus(_client.session!.uid, true);
       return false;
@@ -425,12 +439,13 @@ class TaskRepository {
   /// Mobile Check-Out with GPS coordinates. Returns true if synced live, false if queued offline.
   Future<bool> checkOut(double lat, double lng) async {
     final timestamp = DateTime.now().toUtc().toIso8601String();
+    final mapLink = _mapLink(lat, lng);
     if (_syncManager.isOnline) {
       try {
         await _client.callKw(
           model: 'workshop.duty.log',
           method: 'action_mobile_check_out',
-          args: [lat, lng, timestamp],
+          args: [lat, lng, timestamp, mapLink],
         );
         await _taskCache.saveDutyStatus(_client.session!.uid, false);
         return true;
@@ -439,7 +454,12 @@ class TaskRepository {
         await _dbHelper.queueAction(
           'check_out',
           0,
-          payload: '{"lat": $lat, "lng": $lng, "timestamp": "$timestamp"}',
+          payload: jsonEncode({
+            'lat': lat,
+            'lng': lng,
+            'timestamp': timestamp,
+            'map_link': mapLink
+          }),
         );
         await _taskCache.saveDutyStatus(_client.session!.uid, false);
         return false;
@@ -448,7 +468,12 @@ class TaskRepository {
       await _dbHelper.queueAction(
         'check_out',
         0,
-        payload: '{"lat": $lat, "lng": $lng, "timestamp": "$timestamp"}',
+        payload: jsonEncode({
+          'lat': lat,
+          'lng': lng,
+          'timestamp': timestamp,
+          'map_link': mapLink
+        }),
       );
       await _taskCache.saveDutyStatus(_client.session!.uid, false);
       return false;

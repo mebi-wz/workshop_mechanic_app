@@ -158,18 +158,22 @@ class SyncManager {
           } else if (type == 'check_in') {
             final p = action['payload'] as String;
             final map = _parsePayload(p);
+            final mapLink = map['map_link'] ??
+                'https://www.google.com/maps/search/?api=1&query=${map['lat']},${map['lng']}';
             await _client.callKw(
               model: 'workshop.duty.log',
               method: 'action_mobile_check_in',
-              args: [map['lat'], map['lng'], map['timestamp']],
+              args: [map['lat'], map['lng'], map['timestamp'], mapLink],
             );
           } else if (type == 'check_out') {
             final p = action['payload'] as String;
             final map = _parsePayload(p);
+            final mapLink = map['map_link'] ??
+                'https://www.google.com/maps/search/?api=1&query=${map['lat']},${map['lng']}';
             await _client.callKw(
               model: 'workshop.duty.log',
               method: 'action_mobile_check_out',
-              args: [map['lat'], map['lng'], map['timestamp']],
+              args: [map['lat'], map['lng'], map['timestamp'], mapLink],
             );
           }
 
