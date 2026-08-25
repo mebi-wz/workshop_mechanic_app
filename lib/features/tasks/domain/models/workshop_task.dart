@@ -15,6 +15,7 @@ class WorkshopTask extends Equatable {
   final String? notes;
   final String? mrcvStatus;
   final String? mrcvRef;
+  final bool isFieldWork;
 
   const WorkshopTask({
     required this.id,
@@ -31,6 +32,7 @@ class WorkshopTask extends Equatable {
     this.notes,
     this.mrcvStatus,
     this.mrcvRef,
+    this.isFieldWork = false,
   });
 
   bool get isCompleted => ['completed', 'reviewed', 'closed'].contains(status);
@@ -83,24 +85,30 @@ class WorkshopTask extends Equatable {
       mrcvRef = json['mrcv_ref'] as String;
     }
 
+    String? parseString(dynamic val) {
+      if (val is String) return val;
+      return null;
+    }
+
     return WorkshopTask(
       id: json['id'] as int,
-      description: json['description'] as String? ?? '',
+      description: parseString(json['description']) ?? '',
       estimatedHours: (json['estimated_hours'] as num?)?.toDouble() ?? 0.0,
       actualHours: (json['actual_hours'] as num?)?.toDouble() ?? 0.0,
-      status: json['status'] as String? ?? 'created',
+      status: parseString(json['status']) ?? 'created',
       isWorking: json['is_working'] as bool? ?? false,
       currentLogStart: logStart,
       technicianName: technicianName,
       sectionName: sectionName,
       jobId: jobId,
       jobName: jobName,
-      notes: json['notes'] as String?,
+      notes: parseString(json['notes']),
       mrcvStatus: mrcvStatus,
       mrcvRef: mrcvRef,
+      isFieldWork: json['is_field_work'] as bool? ?? false,
     );
   }
 
   @override
-  List<Object?> get props => [id, status, isWorking, actualHours, mrcvStatus];
+  List<Object?> get props => [id, status, isWorking, actualHours, mrcvStatus, isFieldWork];
 }

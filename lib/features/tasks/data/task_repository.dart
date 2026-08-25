@@ -67,6 +67,7 @@ class TaskRepository {
     'notes',
     'mrcv_status',
     'mrcv_ref',
+    'is_field_work',
   ];
 
   List<WorkshopTask> _getCachedMyTasks(String? statusFilter) {
@@ -112,6 +113,151 @@ class TaskRepository {
 
       // Update local cache
       await _taskCache.saveTasks(_myTasksCacheKey(statusFilter), records);
+
+      // Asynchronously pre-fetch field work job details & preview items without blocking return
+      Future.microtask(() async {
+        for (final r in records) {
+          if (r['is_field_work'] == true && r['job_id'] is List && r['job_id'].isNotEmpty) {
+            final jobId = r['job_id'][0] as int;
+            try {
+              final jobRecs = await _client.searchRead(
+                model: 'workshop.order',
+                domain: [
+                  ['id', '=', jobId]
+                ],
+                fields: [
+                  'id',
+                  'name',
+                  'vehicle_id',
+                  'selected_pms_interval',
+                  'nearest_pms_interval',
+                  'show_pms_warning',
+                  'remark',
+                  'missing_parts',
+                  'task_ids',
+                ],
+                limit: 1,
+              );
+
+              if (jobRecs.isNotEmpty) {
+                final order = Map<String, dynamic>.from(jobRecs.first);
+                final taskIds = order['task_ids'] is List
+                    ? (order['task_ids'] as List).cast<int>()
+                    : <int>[];
+                List<Map<String, dynamic>> tasksList = [];
+                if (taskIds.isNotEmpty) {
+                  tasksList = await _client.searchRead(
+                    model: 'workshop.task',
+                    domain: [
+                      ['id', 'in', taskIds]
+                    ],
+                    fields: [
+                      'id',
+                      'description',
+                      'status',
+                      'is_field_reported',
+                      'estimated_hours',
+                      'technician_id',
+                      'notes',
+                    ],
+                  );
+                }
+                order['tasks_list'] = tasksList;
+                await _taskCache.saveJobDetails(jobId, order);
+
+                final selectedKm = order['selected_pms_interval'];
+                if (selectedKm is int) {
+                  final lines = await _client.searchRead(
+                    model: 'workshop.pm.interval.line',
+                    domain: [
+                      ['interval', '=', selectedKm],
+                      ['action', 'in', ['R', 'I', 'A', 'C']]
+                    ],
+                    fields: ['item_id', 'action'],
+                  );
+
+                  List<Map<String, dynamic>> previewItems = [];
+                  for (final line in lines) {
+                    final itemVal = line['item_id'];
+                    int? itemId;
+                    String itemName = '';
+                    if (itemVal is List && itemVal.length == 2) {
+                      itemId = itemVal[0] as int;
+                      itemName = itemVal[1] as String;
+                    }
+                    String serviceInterval = 'Regular Check';
+                    if (itemId != null) {
+                      final itemRecs = await _client.searchRead(
+                        model: 'workshop.pm.item',
+                        domain: [
+                          ['id', '=', itemId]
+                        ],
+                        fields: ['instruction', 'description'],
+                        limit: 1,
+                      );
+                      if (itemRecs.isNotEmpty) {
+                        final inst = itemRecs.first['instruction'];
+                        if (inst is String && inst.isNotEmpty) {
+                          serviceInterval = inst;
+                        }
+                      }
+                    }
+
+                    final code = line['action'] as String?;
+                    String actionName = 'Check';
+                    if (code == 'R') actionName = 'Replace';
+                    if (code == 'I') actionName = 'Inspect';
+                    if (code == 'A') actionName = 'Adjust';
+                    if (code == 'C') actionName = 'Clean';
+
+                    previewItems.add({
+                      'description': itemName,
+                      'action_label': '$actionName $itemName',
+                      'service_interval': serviceInterval,
+                      'action': code,
+                    });
+                  }
+                  await _taskCache.saveMap('pms_preview_${jobId}_$selectedKm', {
+                    'items': previewItems,
+                  });
+                }
+              }
+            } catch (_) {}
+          }
+        }
+
+        // Pre-fetch employee work hours schedule / leave module rules for offline check-in validation
+        try {
+          final empRecs = await _client.searchRead(
+            model: 'hr.employee',
+            domain: [
+              ['user_id', '=', _client.session!.uid]
+            ],
+            fields: ['id', 'name', 'resource_calendar_id'],
+            limit: 1,
+          );
+
+          if (empRecs.isNotEmpty) {
+            final emp = empRecs.first;
+            final calRef = emp['resource_calendar_id'];
+            if (calRef is List && calRef.isNotEmpty) {
+              final calId = calRef[0] as int;
+              final calAtts = await _client.searchRead(
+                model: 'resource.calendar.attendance',
+                domain: [
+                  ['calendar_id', '=', calId]
+                ],
+                fields: ['dayofweek', 'hour_from', 'hour_to', 'day_period', 'name'],
+              );
+              await _taskCache.saveMap('work_hours_schedule_${_client.session!.uid}', {
+                'calendar_id': calId,
+                'calendar_name': calRef.length > 1 ? calRef[1] : '',
+                'attendances': calAtts,
+              });
+            }
+          }
+        } catch (_) {}
+      });
 
       return records.map(WorkshopTask.fromOdoo).toList();
     } catch (e) {
@@ -398,7 +544,7 @@ class TaskRepository {
         await _client.callKw(
           model: 'workshop.duty.log',
           method: 'action_mobile_check_in',
-          args: [lat, lng, timestamp, mapLink],
+          args: [lat, lng, timestamp],
         );
         await _taskCache.saveDutyStatus(_client.session!.uid, true);
         return true;
@@ -445,7 +591,7 @@ class TaskRepository {
         await _client.callKw(
           model: 'workshop.duty.log',
           method: 'action_mobile_check_out',
-          args: [lat, lng, timestamp, mapLink],
+          args: [lat, lng, timestamp],
         );
         await _taskCache.saveDutyStatus(_client.session!.uid, false);
         return true;

@@ -53,6 +53,14 @@ class HiveTaskCache {
     });
   }
 
+  Future<void> saveJobDetails(int jobId, Map<String, dynamic> details) async {
+    await saveMap('job_details_$jobId', details);
+  }
+
+  Map<String, dynamic>? getJobDetails(int jobId) {
+    return getMap('job_details_$jobId');
+  }
+
   Map<String, dynamic>? getMap(String key) {
     final cached = _box.get(key);
     if (cached is! Map || cached['value'] is! Map) return null;

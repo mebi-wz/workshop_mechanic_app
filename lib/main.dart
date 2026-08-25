@@ -127,35 +127,166 @@ class _LocationGateState extends State<LocationGate>
   @override
   Widget build(BuildContext context) {
     if (_ready) return widget.child;
-    return Scaffold(
+    if (_checking) {
+      return Scaffold(
+        backgroundColor: context.appColors.background,
         body: Center(
-            child: Padding(
-                padding: const EdgeInsets.all(28),
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.gps_fixed_rounded,
-                      size: 56, color: Theme.of(context).colorScheme.primary),
-                  const SizedBox(height: 18),
-                  const Text('Precise location is required',
-                      textAlign: TextAlign.center,
-                      style:
-                          TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
-                  const SizedBox(height: 10),
-                  const Text(
-                      'Turn on Location and allow Precise location to use this app.',
-                      textAlign: TextAlign.center),
-                  const SizedBox(height: 22),
-                  FilledButton.icon(
-                      onPressed: _checking
-                          ? null
-                          : () async {
-                              await Geolocator.openLocationSettings();
-                              await _check();
-                            },
-                      icon: const Icon(Icons.settings_rounded),
-                      label: const Text('Open location settings')),
-                  TextButton(
-                      onPressed: _check,
-                      child: const Text('I turned it on — check again')),
-                ]))));
+          child: CircularProgressIndicator(
+            color: context.appColors.primary,
+          ),
+        ),
+      );
+    }
+    return Scaffold(
+      backgroundColor: context.appColors.background,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          child: Column(
+            children: [
+              const Spacer(),
+              Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: context.appColors.primary.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.location_on_rounded,
+                  size: 42,
+                  color: context.appColors.primary,
+                ),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Precise Location Required',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'To accurately log duty check-ins and field work, the app requires Precise Location access.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: context.appColors.textMuted,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 28),
+
+              // Step-by-step guide container
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: context.appColors.surfaceHigh,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: context.appColors.border),
+                ),
+                child: Column(
+                  children: [
+                    _buildStepRow(
+                      number: '1',
+                      title: 'Tap "Open App Settings" below',
+                    ),
+                    const Divider(height: 20),
+                    _buildStepRow(
+                      number: '2',
+                      title: 'Tap Permissions → Location',
+                    ),
+                    const Divider(height: 20),
+                    _buildStepRow(
+                      number: '3',
+                      title: 'Enable "Use Precise Location" toggle',
+                    ),
+                  ],
+                ),
+              ),
+
+              const Spacer(),
+
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    backgroundColor: context.appColors.primary,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: _checking
+                      ? null
+                      : () async {
+                          await Geolocator.openAppSettings();
+                          await Geolocator.openLocationSettings();
+                          await _check();
+                        },
+                  icon: const Icon(Icons.settings_suggest_rounded),
+                  label: const Text(
+                    'Open App Settings',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  minimumSize: const Size(double.infinity, 48),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: _check,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('I Have Enabled It — Check Again'),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStepRow({required String number, required String title}) {
+    return Row(
+      children: [
+        Container(
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            color: context.appColors.primary,
+            shape: BoxShape.circle,
+          ),
+          child: Center(
+            child: Text(
+              number,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 13,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }

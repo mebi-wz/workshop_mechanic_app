@@ -158,22 +158,52 @@ class SyncManager {
           } else if (type == 'check_in') {
             final p = action['payload'] as String;
             final map = _parsePayload(p);
-            final mapLink = map['map_link'] ??
-                'https://www.google.com/maps/search/?api=1&query=${map['lat']},${map['lng']}';
             await _client.callKw(
               model: 'workshop.duty.log',
               method: 'action_mobile_check_in',
-              args: [map['lat'], map['lng'], map['timestamp'], mapLink],
+              args: [map['lat'], map['lng'], map['timestamp']],
             );
           } else if (type == 'check_out') {
             final p = action['payload'] as String;
             final map = _parsePayload(p);
-            final mapLink = map['map_link'] ??
-                'https://www.google.com/maps/search/?api=1&query=${map['lat']},${map['lng']}';
             await _client.callKw(
               model: 'workshop.duty.log',
               method: 'action_mobile_check_out',
-              args: [map['lat'], map['lng'], map['timestamp'], mapLink],
+              args: [map['lat'], map['lng'], map['timestamp']],
+            );
+          } else if (type == 'select_pms_interval') {
+            final p = action['payload'] as String;
+            final map = _parsePayload(p);
+            await _client.callKw(
+              model: 'workshop.order',
+              method: 'action_select_pms_interval',
+              args: [
+                [taskId],
+                map['km']
+              ],
+            );
+          } else if (type == 'proceed_pms_replacement') {
+            await _client.callKw(
+              model: 'workshop.order',
+              method: 'action_proceed_pms_replacement',
+              args: [
+                [taskId]
+              ],
+            );
+          } else if (type == 'save_field_notes') {
+            final p = action['payload'] as String;
+            final map = _parsePayload(p);
+            final writeVals = <String, dynamic>{};
+            if (map.containsKey('remark')) writeVals['remark'] = map['remark'];
+            if (map.containsKey('missing_parts')) writeVals['missing_parts'] = map['missing_parts'];
+
+            await _client.callKw(
+              model: 'workshop.order',
+              method: 'write',
+              args: [
+                [taskId],
+                writeVals,
+              ],
             );
           }
 

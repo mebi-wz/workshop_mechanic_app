@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -17,7 +16,11 @@ import '../../../core/di/service_locator.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/sync/sync_manager.dart';
 import '../../../core/localization/app_locale.dart';
+import '../domain/models/workshop_task.dart';
 import '../data/task_repository.dart';
+import '../../../core/database/hive_task_cache.dart';
+import '../../../core/network/odoo_client.dart';
+import '../../../core/security/anti_tamper_service.dart';
 
 class TaskListPage extends StatefulWidget {
   const TaskListPage({super.key});
@@ -120,7 +123,9 @@ class _TaskListPageState extends State<TaskListPage> {
       showLoading: false,
     ));
 
-    await refreshed;
+    try {
+      await refreshed.timeout(const Duration(seconds: 5));
+    } catch (_) {}
     await _updatePendingSyncCount();
   }
 
@@ -225,6 +230,85 @@ class _TaskListPageState extends State<TaskListPage> {
     setState(() => _isUpdatingDutyStatus = true);
 
     try {
+      // 1. Mandatory Pre-check: Anti-Tamper Verification (AUTO_TIME, Monotonic Uptime & Time Travel)
+      final tamperResult = await AntiTamperService.checkTimeIntegrity();
+      if (tamperResult.isTampered) {
+        if (!mounted) return;
+        final sysFormatted = DateFormat('yyyy-MM-dd HH:mm:ss').format(tamperResult.systemTime);
+
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogCtx) => AlertDialog(
+            icon: const Icon(
+              Icons.gavel_rounded,
+              color: Colors.redAccent,
+              size: 52,
+            ),
+            title: const Text(
+              '⚠️ DATE & TIME TAMPERING DETECTED',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.w900,
+                fontSize: 17,
+              ),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+                  ),
+                  child: Text(
+                    tamperResult.reason ??
+                        'Your action has been blocked. The app detected that your phone system date or clock was manually altered.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('Phone Date & Time:'),
+                    Text(sysFormatted,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.red,
+                            fontSize: 11)),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                const Text(
+                  'Please reset your phone settings to "Automatic Date & Time" and "Automatic Time Zone" before attempting check-in or check-out.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+            actionsAlignment: MainAxisAlignment.center,
+            actions: [
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(140, 42),
+                ),
+                onPressed: () => Navigator.pop(dialogCtx),
+                icon: const Icon(Icons.check_circle_outline),
+                label: const Text('I Understand'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
       final biometric = LocalAuthentication();
       final supported = await biometric.canCheckBiometrics ||
           await biometric.isDeviceSupported();
@@ -287,6 +371,249 @@ class _TaskListPageState extends State<TaskListPage> {
           duration: Duration(seconds: 3)));
 
       final position = await _getPreciseLocation();
+      final gpsTime = position.timestamp.toLocal();
+
+      // Evaluate working hours tolerance using cached Odoo resource.calendar.attendance rules (supporting morning/afternoon/lunch slots)
+      final currentHour = gpsTime.hour + (gpsTime.minute / 60.0);
+
+      // Default attendance slots if no cached rules are found
+      // Slot: { 'hour_from': 8.0, 'hour_to': 12.0 }, { 'hour_from': 13.0, 'hour_to': 17.0 }
+      List<Map<String, double>> todaysSlots = [
+        {'hour_from': 8.0, 'hour_to': 12.0},
+        {'hour_from': 13.0, 'hour_to': 17.0},
+      ];
+
+      try {
+        final cachedSchedule = sl<HiveTaskCache>().getMap('work_hours_schedule_${sl<OdooClient>().session?.uid}');
+        if (cachedSchedule != null && cachedSchedule['attendances'] is List) {
+          final attendances = List<Map<String, dynamic>>.from(
+            (cachedSchedule['attendances'] as List).map((e) => Map<String, dynamic>.from(e as Map)),
+          );
+          // Odoo dayofweek: '0' = Monday, '6' = Sunday
+          final odooDayOfWeek = ((gpsTime.weekday - 1) % 7).toString();
+          final rawSlots = attendances.where((a) => a['dayofweek'].toString() == odooDayOfWeek).toList();
+
+          if (rawSlots.isNotEmpty) {
+            rawSlots.sort((a, b) => (a['hour_from'] as num).compareTo(b['hour_from'] as num));
+            todaysSlots = rawSlots.map((s) => {
+              'hour_from': (s['hour_from'] as num).toDouble(),
+              'hour_to': (s['hour_to'] as num).toDouble(),
+            }).toList();
+          }
+        }
+      } catch (_) {}
+
+      String formatHour(double h) {
+        final hourInt = h.floor();
+        final minInt = ((h - hourInt) * 60).round();
+        final dt = DateTime(2026, 1, 1, hourInt, minInt);
+        return DateFormat('h:mm a').format(dt);
+      }
+
+      if (_isCheckedIn) {
+        final taskState = context.read<TaskBloc>().state;
+        WorkshopTask? activeWorkingTask;
+        if (taskState is TaskLoaded) {
+          try {
+            activeWorkingTask = taskState.tasks.firstWhere((t) => t.isWorking);
+          } catch (_) {}
+        }
+
+        if (activeWorkingTask != null) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (dialogCtx) => AlertDialog(
+              title: const Text('Checkout Confirmation'),
+              content: const Text(
+                  'You have an active working task timer running. Checking out will automatically stop the task timer.'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogCtx, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: context.appColors.warning,
+                  ),
+                  onPressed: () => Navigator.pop(dialogCtx, true),
+                  child: const Text('Proceed'),
+                ),
+              ],
+            ),
+          );
+
+          if (confirm != true) return;
+          context.read<TaskBloc>().add(StopTimerEvent(activeWorkingTask.id));
+        }
+
+        // Find relevant checkout slot target (e.g. morning checkout for lunch or end-of-day checkout)
+        Map<String, double>? activeSlot;
+        for (final slot in todaysSlots) {
+          if (currentHour >= (slot['hour_from']! - 1.0) && currentHour <= (slot['hour_to']! + 1.5)) {
+            activeSlot = slot;
+            break;
+          }
+        }
+        activeSlot ??= todaysSlots.last;
+
+        final targetCheckout = activeSlot['hour_to']!;
+        final checkOutEarlyTolerance = targetCheckout - 0.5; // 30 mins early
+        final checkOutLateTolerance = targetCheckout + 0.5;  // 30 mins late
+
+        final checkOutStr = formatHour(targetCheckout);
+        final earlyOutStr = formatHour(checkOutEarlyTolerance);
+        final lateOutStr = formatHour(checkOutLateTolerance);
+
+        if (currentHour < checkOutEarlyTolerance || currentHour > checkOutLateTolerance) {
+          await showDialog<void>(
+            context: context,
+            builder: (dialogCtx) => AlertDialog(
+              title: const Text('Checkout Not Allowed'),
+              content: Text(
+                  'Checkout is only permitted within 30 minutes of shift break/end ($earlyOutStr – $lateOutStr). Your checkout attempt is outside this 30-minute tolerance window for $checkOutStr.'),
+              actions: [
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogCtx),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+          return;
+        } else if (currentHour >= checkOutEarlyTolerance && currentHour < targetCheckout) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (dialogCtx) => AlertDialog(
+              title: const Text('Early Checkout Warning'),
+              content: Text(
+                  'You are checking out early within 30 minutes before shift break/end ($checkOutStr). Do you want to proceed?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogCtx, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: context.appColors.warning,
+                  ),
+                  onPressed: () => Navigator.pop(dialogCtx, true),
+                  child: const Text('Proceed'),
+                ),
+              ],
+            ),
+          );
+
+          if (confirm != true) return;
+        } else if (currentHour > targetCheckout && currentHour <= checkOutLateTolerance) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (dialogCtx) => AlertDialog(
+              title: const Text('Late Checkout Warning'),
+              content: Text(
+                  'You are checking out late within the 30-minute grace period after shift break/end ($checkOutStr – $lateOutStr). Do you want to proceed?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogCtx, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: context.appColors.warning,
+                  ),
+                  onPressed: () => Navigator.pop(dialogCtx, true),
+                  child: const Text('Proceed'),
+                ),
+              ],
+            ),
+          );
+
+          if (confirm != true) return;
+        }
+      } else {
+        // Find relevant check-in slot target (morning shift start or post-lunch afternoon shift start)
+        Map<String, double>? targetCheckInSlot;
+        for (final slot in todaysSlots) {
+          if (currentHour <= (slot['hour_from']! + 1.0)) {
+            targetCheckInSlot = slot;
+            break;
+          }
+        }
+        targetCheckInSlot ??= todaysSlots.first;
+
+        final targetCheckIn = targetCheckInSlot['hour_from']!;
+        final checkInEarlyTolerance = targetCheckIn - 0.5; // 30 mins early
+        final checkInLateTolerance = targetCheckIn + 0.5;  // 30 mins late
+
+        final checkInStr = formatHour(targetCheckIn);
+        final earlyInStr = formatHour(checkInEarlyTolerance);
+        final lateInStr = formatHour(checkInLateTolerance);
+
+        if (currentHour < checkInEarlyTolerance || currentHour > checkInLateTolerance) {
+          await showDialog<void>(
+            context: context,
+            builder: (dialogCtx) => AlertDialog(
+              title: const Text('Check-In Not Allowed'),
+              content: Text(
+                  'Check-in is only permitted within 30 minutes of shift start ($earlyInStr – $lateInStr). Your check-in attempt is outside this 30-minute tolerance window for $checkInStr.'),
+              actions: [
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogCtx),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+          return;
+        } else if (currentHour >= checkInEarlyTolerance && currentHour < targetCheckIn) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (dialogCtx) => AlertDialog(
+              title: const Text('Early Check-In Warning'),
+              content: Text(
+                  'You are checking in early within 30 minutes before shift start ($checkInStr). Do you want to proceed?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogCtx, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: context.appColors.warning,
+                  ),
+                  onPressed: () => Navigator.pop(dialogCtx, true),
+                  child: const Text('Proceed'),
+                ),
+              ],
+            ),
+          );
+
+          if (confirm != true) return;
+        } else if (currentHour > targetCheckIn && currentHour <= checkInLateTolerance) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (dialogCtx) => AlertDialog(
+              title: const Text('Late Check-In Warning'),
+              content: Text(
+                  'You are checking in late within the 30-minute grace period after shift start ($checkInStr – $lateInStr). Do you want to proceed?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogCtx, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: context.appColors.warning,
+                  ),
+                  onPressed: () => Navigator.pop(dialogCtx, true),
+                  child: const Text('Proceed'),
+                ),
+              ],
+            ),
+          );
+
+          if (confirm != true) return;
+        }
+      }
 
       final repo = sl<TaskRepository>();
       final isOnlineSync = _isCheckedIn
@@ -340,30 +667,27 @@ class _TaskListPageState extends State<TaskListPage> {
   }
 
   Future<Position> _getPreciseLocation() async {
-    final fused = await _bestFreshFix(
-      Platform.isAndroid
-          ? AndroidSettings(
-              accuracy: LocationAccuracy.bestForNavigation,
-              timeLimit: const Duration(seconds: 15),
-            )
-          : const LocationSettings(
-              accuracy: LocationAccuracy.bestForNavigation,
-              timeLimit: Duration(seconds: 15),
-            ),
-    );
-    if (fused != null) return fused;
-
-    if (Platform.isAndroid) {
-      // Offline fallback: direct hardware GPS. No cached position is used.
-      final gps = await _bestFreshFix(AndroidSettings(
-        forceLocationManager: true,
-        accuracy: LocationAccuracy.bestForNavigation,
-        timeLimit: const Duration(seconds: 20),
-      ));
-      if (gps != null) return gps;
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: AndroidSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 7),
+          forceLocationManager: true,
+        ),
+      );
+      return pos;
+    } catch (_) {
+      final fused = await _bestFreshFix(
+        AndroidSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 5),
+          forceLocationManager: true,
+        ),
+      );
+      if (fused != null) return fused;
     }
     throw TimeoutException(
-        'A fresh GPS fix with 5 metre accuracy was not available.');
+        'Could not obtain GPS location. Please ensure location services are enabled.');
   }
 
   Future<Position?> _bestFreshFix(LocationSettings settings) async {
@@ -381,9 +705,9 @@ class _TaskListPageState extends State<TaskListPage> {
     subscription = Geolocator.getPositionStream(locationSettings: settings)
         .listen((position) {
       if (best == null || position.accuracy < best!.accuracy) best = position;
-      if (position.accuracy <= 5) finish();
+      if (position.accuracy <= 25) finish();
     }, onError: (_) => finish());
-    timeout = Timer(const Duration(seconds: 120), finish);
+    timeout = Timer(const Duration(seconds: 5), finish);
     return result.future;
   }
 
@@ -499,6 +823,7 @@ class _TaskListPageState extends State<TaskListPage> {
       body: Column(
         children: [
           _buildShiftPanel(),
+          _buildJobCategoryTabs(),
           _buildFilterBar(),
           Expanded(
             child: BlocConsumer<TaskBloc, TaskState>(
@@ -518,15 +843,19 @@ class _TaskListPageState extends State<TaskListPage> {
                   return _buildRefreshableStatus(_buildError(state.message));
                 }
                 if (state is TaskLoaded) {
-                  // If the mode was switched while loading or state updated from action, sync UI
-                  WidgetsBinding.instance.addPostFrameCallback((_) {});
-                  if (state.tasks.isEmpty) {
+                  final filteredTasks = state.tasks.where((t) {
+                    if (_jobCategory == 'workshop') return !t.isFieldWork;
+                    if (_jobCategory == 'field') return t.isFieldWork;
+                    return true;
+                  }).toList();
+
+                  if (filteredTasks.isEmpty) {
                     return _buildRefreshableStatus(_buildEmpty());
                   }
                   return Column(
                     children: [
                       if (!state.isAvailableMode)
-                        LiveStatusBanner(tasks: state.tasks),
+                        LiveStatusBanner(tasks: filteredTasks),
                       Expanded(
                         child: _OfflineAwareRefresh(
                           isOnline: _isOnline,
@@ -539,14 +868,15 @@ class _TaskListPageState extends State<TaskListPage> {
                               16,
                               32 + MediaQuery.paddingOf(context).bottom,
                             ),
-                            itemCount: state.tasks.length,
+                            itemCount: filteredTasks.length,
                             itemBuilder: (ctx, i) {
-                              final task = state.tasks[i];
+                              final task = filteredTasks[i];
                               final isProcessing =
                                   state.processingTaskId == task.id;
                               return TaskCard(
                                 task: task,
                                 isProcessing: isProcessing,
+                                isCheckedIn: _isCheckedIn,
                                 onTakeTask: state.isAvailableMode
                                     ? () => context
                                         .read<TaskBloc>()
@@ -752,6 +1082,65 @@ class _TaskListPageState extends State<TaskListPage> {
           children: [
             SizedBox(height: constraints.maxHeight, child: child),
           ],
+        ),
+      ),
+    );
+  }
+
+  String _jobCategory = 'workshop'; // 'workshop', 'field'
+
+  Widget _buildJobCategoryTabs() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: context.appColors.surfaceHigh,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appColors.border),
+      ),
+      child: Row(
+        children: [
+          _buildCategoryTab('workshop', 'Workshop Jobs', Icons.build_circle_outlined),
+          _buildCategoryTab('field', 'Field Work', Icons.near_me_outlined),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCategoryTab(String key, String title, IconData icon) {
+    final active = _jobCategory == key;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _jobCategory = key),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? context.appColors.primary : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 15,
+                color: active ? Colors.white : context.appColors.textMuted,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  title,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: active ? FontWeight.bold : FontWeight.w500,
+                    color: active ? Colors.white : context.appColors.textMuted,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

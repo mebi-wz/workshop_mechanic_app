@@ -3,10 +3,12 @@ import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/localization/app_locale.dart';
 import '../domain/models/workshop_task.dart';
+import 'field_work_report_sheet.dart';
 
 class TaskCard extends StatefulWidget {
   final WorkshopTask task;
   final bool isProcessing;
+  final bool isCheckedIn;
   final VoidCallback onStartTimer;
   final VoidCallback onStopTimer;
   final VoidCallback onMarkDone;
@@ -18,6 +20,7 @@ class TaskCard extends StatefulWidget {
     super.key,
     required this.task,
     required this.isProcessing,
+    this.isCheckedIn = true,
     required this.onStartTimer,
     required this.onStopTimer,
     required this.onMarkDone,
@@ -200,12 +203,24 @@ class _TaskCardState extends State<TaskCard> {
                 ),
               ],
             ),
-            if (task.sectionName != null || task.mrcvStatus != null) ...[
+            if (task.sectionName != null || task.mrcvStatus != null || task.isFieldWork) ...[
               const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
                 children: [
+                  if (task.isFieldWork)
+                    const _InfoChip(
+                      icon: Icons.near_me_outlined,
+                      label: 'FIELD WORK',
+                      color: Color(0xFF00B4D8),
+                    )
+                  else
+                    _InfoChip(
+                      icon: Icons.build_circle_outlined,
+                      label: 'WORKSHOP',
+                      color: context.appColors.primary,
+                    ),
                   if (task.sectionName != null)
                     _InfoChip(
                         icon: Icons.precision_manufacturing_outlined,
@@ -236,24 +251,45 @@ class _TaskCardState extends State<TaskCard> {
               else ...[
                 SizedBox(
                   width: double.infinity,
-                  child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: task.isWorking
-                          ? context.appColors.warning
-                          : context.appColors.success,
-                      foregroundColor: context.appColors.background,
-                    ),
-                    onPressed: widget.isProcessing
-                        ? null
-                        : task.isWorking
-                            ? widget.onStopTimer
-                            : widget.onStartTimer,
-                    icon: _buttonIcon(task.isWorking
-                        ? Icons.stop_rounded
-                        : Icons.play_arrow_rounded),
-                    label: Text(task.isWorking
-                        ? context.tr('stopWorkTimer')
-                        : context.tr('startWork')),
+                  child: Builder(
+                    builder: (context) {
+                      final requiresCheckIn = task.isFieldWork;
+                      final canStart = !requiresCheckIn || widget.isCheckedIn;
+
+                      return ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: task.isWorking
+                              ? context.appColors.warning
+                              : canStart
+                                  ? context.appColors.success
+                                  : context.appColors.textMuted,
+                          foregroundColor: context.appColors.background,
+                        ),
+                        onPressed: widget.isProcessing
+                            ? null
+                            : task.isWorking
+                                ? widget.onStopTimer
+                                : () {
+                                    if (!canStart) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Please check in before starting Field Work.'),
+                                          backgroundColor: Colors.orange,
+                                          duration: Duration(seconds: 3),
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                    widget.onStartTimer();
+                                  },
+                        icon: _buttonIcon(task.isWorking
+                            ? Icons.stop_rounded
+                            : Icons.play_arrow_rounded),
+                        label: Text(task.isWorking
+                            ? context.tr('stopWorkTimer')
+                            : context.tr('startWork')),
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -288,6 +324,28 @@ class _TaskCardState extends State<TaskCard> {
                     ],
                   ],
                 ),
+                if (task.isFieldWork && task.jobId != null) ...[
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF00B4D8),
+                        side: const BorderSide(color: Color(0xFF00B4D8)),
+                      ),
+                      onPressed: () {
+                        showModalBottomSheet(
+                          context: context,
+                          isScrollControlled: true,
+                          backgroundColor: Colors.transparent,
+                          builder: (_) => FieldWorkReportSheet(task: task),
+                        );
+                      },
+                      icon: const Icon(Icons.note_add_outlined, size: 18),
+                      label: const Text('Report Discovered Tasks & PMS'),
+                    ),
+                  ),
+                ],
               ],
             ],
           ],
@@ -421,24 +479,20 @@ class _InfoChip extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: context.appColors.surfaceHigh,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 14, color: color ?? context.appColors.textMuted),
-            const SizedBox(width: 6),
-            Text(label,
-                style: TextStyle(
-                    color: color ?? context.appColors.textMuted,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600)),
-          ],
-        ),
+  Widget build(BuildContext context) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color ?? context.appColors.textMuted),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: color ?? context.appColors.textMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       );
 }
 
